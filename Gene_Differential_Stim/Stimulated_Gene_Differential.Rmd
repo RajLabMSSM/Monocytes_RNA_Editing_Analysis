@@ -1,0 +1,1451 @@
+---
+title: "Stimulated_Monocytes: Differential Analysis on Gene and Sites"
+date: "April 2023"
+author: "Hyomin Seo"
+output:
+  rmarkdown::html_document:
+   theme: cerulean
+   highlight: kate
+   code_folding: hide
+   toc: true
+   toc_float: true
+   df_print: paged
+   smooth_scroll: true
+   number_sections: false
+   self_contained: true
+---
+
+```{r setup, include=FALSE}
+#install.packages('knitr')
+knitr::opts_chunk$set(echo = TRUE)
+#install.packages('BiocManager')
+#BiocManager::install("satuRn")
+#BiocManager::install("edgeR")
+#install.packages("edgeR")
+library(edgeR)
+#install.packages("dplyr")#
+#install.packages("tidyverse")
+library(tidyverse)
+library(BiocManager)
+library(SummarizedExperiment)
+#biocLite("edgeR")
+#install.packages("edgeR")
+#library(edgeR)
+library(dplyr)
+library(purrr)
+#install.packages('pachwork')
+#library(patchwork)
+library(limma)
+#install.packages('ggfortify')
+library(ggfortify)
+library(data.table)
+library(matrixStats)
+library(broom)
+#library(ComplexHeatmap)
+#BiocManager::install("variancePartition")
+library(variancePartition)
+library(rlang)
+library(gplots)
+library(ggplot2)
+#install.packages("ggpubr")
+library("ggpubr")
+#BiocManager::install("factoextra")
+library(factoextra)
+#BiocManager::install("ComplexHeatmap")
+library(ComplexHeatmap)
+#library(edgeR)
+#BiocManager::install("Glimma")
+#install.packages("Glimma")
+library(Glimma)
+library(gprofiler2)
+#BiocManager::install("EnsDb.Hsapiens.v79")
+library(EnsDb.Hsapiens.v79)
+#BiocManager::install("reshape")
+library(reshape)
+library(tidyverse)
+library(ggrepel)
+```
+
+
+#### 156 Stimulated Monocytes
+
+This is analysis on Stimulated Monocytes - LPS,IFNb and Basal samples (Stim cohort). There are 52 samples in each category, in total of 156 samples. \
+
+This markdown is divided by two parts ( LPS and IFNb ), followed by Limma Gene Differential, DES and DEG comparision, and DES and DEG Pathway comparison. \
+
+* LPS vs Basal Samples \
+  + Limma Gene Differential \
+  + DEGenes (Differential Expressed Genes) and DESites (Differential Edited RNA editing sites) from previous Limma editing differential analysis)'s comparison \
+  + DEGenes and DESites' pathway comparison \
+  
+* IFNb vs Basal Samples \
+  + Limma Gene Differential \
+  + DEGenes (Differential Expressed Genes) and DESites (Differential Edited RNA editing sites) from previous Limma editing differential analysis)'s comparison \
+  + DEGenes and DESites' pathway comparison \
+
+
+
+***
+
+
+
+## Data 
+Genes that have mean TPM > 1 were selected to be analysed (filtering by tpm value, and using that to filter the count matrix) \
+Both Basal and Stimulated samples are distributed across two batches \
+```{r stim_1, echo= TRUE, message = FALSE, warning=FALSE, eval=FALSE}
+# No run 
+load("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/Rdata/gene_matrix.RData")
+
+#  Metadata for Stim
+meta<-read_tsv("/Users/hyominseo/Desktop/RAJ/Stim_Limma/meta.tsv")
+
+tpm<-as.data.frame(genes_tpm)
+tpm<-tpm%>%dplyr::filter(rowMeans(.)>1)%>%
+  dplyr::mutate(SD=rowSds(as.matrix(.))) %>%
+  dplyr::filter(SD > 0) %>%
+  dplyr::select(.,-SD)
+tpm<-as.data.frame(t(tpm))
+tpm<-tpm%>%dplyr::filter (rownames(.) %in% meta$sample)
+tpm<-as.data.frame(t(tpm))
+
+count<-genes_counts%>%
+  dplyr::filter(rownames(.)  %in%  rownames(tpm))
+count<-as.data.frame(t(count)) 
+count<-count%>%dplyr::filter (rownames(.) %in% meta$sample)
+count<-as.data.frame(t(count))
+filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/Rdata")
+save(count,tpm,meta, file = file.path(filepath, "Nav_156_gene_data.RData"))
+
+#Making all Gene Name dataframe
+all_gene<-as.data.frame(rownames(count))%>%
+  dplyr::rename("GENEID" = "rownames(count)")
+gencode<-read_tsv("gencode.v30.tx2gene.tsv")%>%
+  distinct(GENEID, .keep_all=TRUE)%>%dplyr::select(-c("TXNAME"))
+
+all_gene_name<-merge(all_gene,gencode, by = "GENEID")%>%dplyr::select(GENENAME)
+filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim")
+write.table(all_gene_name, file = file.path(filepath,"Stimulated_All_Gene_Names.tsv"), 
+            row.names = F, sep = "\t", quote = F)
+```
+
+
+
+
+```{r stim_2, echo= FALSE, message = FALSE, warning=FALSE}
+# Run
+load("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/Rdata/Nav_156_gene_data.RData")
+
+string<-"Genes that have tpm>1 in basal monocytes for PD and Control sample: 58929 ->"
+number<-as.integer(nrow(count))
+print(paste(string,number))
+```
+
+
+***
+
+
+## Gene Differential 
+
+reference: https://ucdavis-bioinformatics-training.github.io/2018-June-RNA-Seq-Workshop/thursday/DE.html \
+reference: text=limma%20is%20an%20R%20package,analyses%20of%20RNA%2DSeq%20data.\
+Makes LPS_Basal.tsv and IFNb_Basal.tsv which is the entire Limma gene differential toptable for all 12961 genes \
+Stim Limma functions have two models, contrast between 'condition' VS Basal.\ 
+
+The filtered gene count matrix is normalized using calcNormfactros.\
+
+Covariate ‘Batch’ encompasses all technical variables \
+
+```{r stim_3, echo= TRUE, message = FALSE, warning=FALSE,eval=FALSE}
+all_cov <- list(
+   batch<-as.factor(meta$Batch),
+   disease<-as.factor(meta$Disease), 
+   condition<-as.factor(meta$Condition),
+   sex<-as.factor(meta$Sex),
+   age<-meta$Age
+)
+
+gencode<-read_tsv("gencode.v30.tx2gene.tsv")%>%
+  distinct(GENEID, .keep_all=TRUE)%>%dplyr::select(-c("TXNAME"))
+
+count_norm<-calcNormFactors(count, method="TMM")
+model<-model.matrix(~0 + condition+batch+sex+age)
+dge<-DGEList(counts=count, samples = meta, norm.factors= count_norm)
+v <- voom(dge, model)
+vfit<-lmFit(v,model)
+
+diff<-function(fit_in, contr_in,file_name){
+  if(contr_in == "contr_IFNb"){contr<-makeContrasts(IFNb =(conditionIFNb - conditionBasal), 
+                                                       levels = colnames(coef(fit_in)))
+    }
+  if(contr_in == "contr_LPS"){contr<-makeContrasts(LPS =(conditionLPS - conditionBasal), 
+                                                   levels = colnames(coef(fit_in)))
+    }
+  vfit_in<-contrasts.fit(fit_in, contr)
+  efit<-eBayes(vfit_in)
+  print(summary(decideTests(efit, p.value  = "0.05")))
+  
+  DE_genes<-topTable(efit, sort.by = "p",n=Inf, coef = 1)
+  DE_genes$GENEID<-rownames(DE_genes)
+  
+  DE_genes <- DE_genes[,c("GENEID", names(DE_genes)[1:6])]
+  DE_genes_ID<-merge(DE_genes,gencode, by = "GENEID")
+  filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable")
+  write.table(DE_genes_ID, file = file.path(filepath,file_name), 
+              row.names = F, sep = "\t", quote = F)
+}
+
+diff(vfit, "contr_IFNb","IFNb_Basal.tsv")
+diff(vfit, "contr_LPS","LPS_Basal.tsv")
+```
+
+```{r stim_4, echo= TRUE, message = FALSE, warning=FALSE}
+Contrast<-c("IFNb vs Basal", "LPS vs Basal")
+Model_Formula<-c( "condition +  batch + sex + age","condition + batch + sex + age")
+Condition_Sample<-c(as.integer(length(grep("IFNb",meta$Condition))),as.integer(length(grep("LPS",meta$Condition))))
+Control_Sample<-c(as.integer(length(grep("Basal",meta$Condition))),as.integer(length(grep("Basal",meta$Condition))))
+df<-data.frame(Contrast, Model_Formula, Condition_Sample, Control_Sample)
+df
+```
+
+
+```{r stim_5, echo= TRUE, message = FALSE, warning=FALSE, eval=FALSE}
+vol_plot<-function(table_in, point_size, text_size,title_text_size,plot_title,label_size){
+  t<-read_tsv(table_in)
+  t$DE_genes<-case_when(
+    t$adj.P.Val < 0.05 & abs(t$logFC) > 1 ~ "TRUE", 
+    t$adj.P.Val > 0.05 & abs(t$logFC) < 1 ~ "FALSE"
+    )
+  # Adding UP and Down regulated gene count 
+  t$DE_direction<-case_when(
+  t$DE_genes == "TRUE" & t$logFC > 0.00 ~ "UP",
+  t$DE_genes == "TRUE" & t$logFC < 0.00 ~ "DOWN"
+  )
+  highlight_df<- t%>%drop_na(DE_genes)
+  highlight_df<-highlight_df%>%dplyr::filter(!grepl("FALSE", DE_genes))
+  highlight_df<-highlight_df%>%dplyr::filter(grepl("ADAR.*|APOBEC.*", GENENAME))
+  
+  vol_plot<- ggplot(t, aes(x=logFC, y=-log10(P.Value), col = DE_direction))+
+    geom_point(size =point_size, alpha=0.7)+
+    theme_bw()+
+    scale_color_manual(values = wes_palette(n=3,name="GrandBudapest1"))+
+    geom_vline(xintercept=c(-1,1), col ="black",linetype="longdash")+
+    labs(title=plot_title)+
+    theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+    theme(text = element_text(size = text_size)) + 
+    theme(legend.position='none') +
+      geom_label_repel(data = highlight_df, aes(label = GENENAME),
+                  box.padding   = 0, point.padding = 0, force = 80,
+                  segment.size  = 0.2,segment.color = "black",
+                  angle = 180,point.size =3,color="black",
+                  nudge_x = 0.5,hjust =0,size = label_size)+
+    geom_point(data = highlight_df, size =point_size, color = "black")
+  vol_plot
+}
+
+sig_genes<-function(toptable){
+  df<-read_tsv(toptable)
+  df$DE_genes<-case_when(
+  # defining sig
+    df$adj.P.Val < 0.05 & abs(df$logFC) > 1 ~ "TRUE", 
+    df$adj.P.Val > 0.05 & abs(df$logFC) < 1 ~ "FALSE"
+    )
+  df<-df%>%dplyr::filter(!grepl("FALSE", DE_genes))
+  df<-df%>%drop_na(DE_genes)
+  df$DE_direction<-case_when(
+  df$logFC > 0.00 ~ "UP",
+  df$logFC < 0.00 ~ "DOWN"
+  )
+  df
+}
+
+lps_DEG<-sig_genes("Stim/TopTable/LPS_Basal.tsv")
+filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable")
+write.table(lps_DEG, file = file.path(filepath,"LPS_Basal_DEG.tsv"),
+           row.names = F, sep = "\t", quote = F)
+
+ifnb_DEG<-sig_genes("Stim/TopTable/IFNb_Basal.tsv")
+filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable")
+write.table(ifnb_DEG, file = file.path(filepath,"IFNb_Basal_DEG.tsv"),
+            row.names = F, sep = "\t", quote = F)
+```
+
+
+
+
+
+## LPS_Basal
+
+* The black dots are the A~ genes (three genes) 
+* Threshold for determining Significantly Expressed Genes : adj.P.Val < 0.05 & abs(t$logFC) > 1
+
+
+```{r stim_6, echo= TRUE, message = FALSE, warning=FALSE, eval=FALSE}
+text_size =10
+title_text_size = 12
+point_size=2
+legend_size = 0.8
+legend_text_size = 15
+label_size = 4
+
+lps_vol_plot<-vol_plot("Stim/TopTable/LPS_Basal.tsv",point_size, text_size, title_text_size, "LPS Stimulated Monocytes",label_size)
+lps_vol_plot<-ggarrange(lps_vol_plot)
+ggsave(plot=lps_vol_plot,filename="Stim/Figures/figure1:lps_vol_plot.jpg",width = 10, height = 5,dpi = 600)
+```
+
+
+```{r stim_7, echo=FALSE, fig.cap="LPS DEGenes Volcano Plot", out.width = '100%'}
+knitr::include_graphics("Stim/Figures/figure1:lps_vol_plot.jpg")
+```
+
+
+```{r stim_8, echo= TRUE, message = FALSE, warning=FALSE}
+lps_DEG<- read_tsv("Stim/TopTable/LPS_Basal_DEG.tsv")
+
+DE_UP_Count<-c( as.integer(length(which(lps_DEG$DE_direction == "UP"))))
+DE_DOWN_Count<-c( as.integer(length(which(lps_DEG$DE_direction == "DOWN"))))
+
+Model<-c("LPS_Basal")
+Model_Formula<-c("condition + batch + sex + age")
+df<-data.frame( Model, Model_Formula, DE_UP_Count, DE_DOWN_Count)
+df
+
+lps_DEG_a<-lps_DEG%>%dplyr::filter(grepl("ADAR.*|APOBEC.*", GENENAME))
+lps_DEG_a<-lps_DEG_a%>%dplyr::select(-c(AveExpr, t, B,DE_genes))%>%arrange(desc(logFC))
+knitr::kable(lps_DEG_a, "simple", caption = "A~ genes in LPS_DEG", table.attr = "style='width:100%;'")
+```
+
+
+
+***
+
+
+
+## LPS : DEG and DES Shared Genes
+
+```{r stim_9, echo=TRUE, message=FALSE, warning=FALSE, eval = FALSE}
+# GENCODE
+gencode<-read_tsv("gencode.v30.tx2gene.tsv")%>%
+    distinct(GENEID, .keep_all=TRUE)%>%
+  dplyr::select(-c("TXNAME"))
+
+# Taking everything after .
+# ".xx" is mismatched in genecode and our annoation file 
+gencode$GENEID<-gsub("\\..*","",gencode$GENEID)
+
+# ANNOTATION 
+Nav_anno<- read_tsv("Stim/Local_Pipeline_Result/all_sites_pileup_annotation.gz")
+Nav_anno<- Nav_anno %>% 
+  dplyr::select(ESid2,ensembl_id, 
+                  location = Func.refGene, mutation =ExonicFunc.refGene)%>%
+  dplyr::rename("ESid" = "ESid2")%>%
+  # changing ensemble_ID to gene
+  dplyr::rename("GENEID" = "ensembl_id")
+
+# LIMMA SITES : 1077 DE sites (adj.P.Val<= 0.05)
+LPS_Basal_DE_Sites<-read_tsv("Stim/TopTable/LPS_1_toptable.tsv")%>%
+  dplyr::filter(adj.P.Val<= 0.05)
+      
+# Adding DESite toptable + Annotation
+LPS_Basal_DE_Sites_anno<-merge(LPS_Basal_DE_Sites, Nav_anno, by ="ESid")
+# Taking every ".xx" out to match with gencode
+LPS_Basal_DE_Sites_anno$GENEID<-gsub("\\..*","",LPS_Basal_DE_Sites_anno$GENEID) 
+
+# LPS Limma Sites + annotation + gencode
+LPS_Basal_DE_Sites_anno_gencode<-merge(LPS_Basal_DE_Sites_anno, gencode, by = "GENEID")
+filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable")
+write.table(LPS_Basal_DE_Sites_anno_gencode, 
+            file = file.path(filepath,"LPS_Basal_DE_Sites.tsv"), 
+            row.names = F, sep = "\t", quote = F)
+```
+
+
+```{r stim_10, echo=TRUE, message=FALSE, warning=FALSE, eval = FALSE}
+# LIMMA SITES : 1089 DE sites (adj.P.Val<= 0.05)
+LPS_Basal_DE_Sites<-read_tsv("Stim/TopTable/LPS_1_toptable.tsv")%>%
+  dplyr::filter(adj.P.Val<= 0.05)
+      
+# Adding DESite toptable + Annotation
+LPS_Basal_DE_Sites_anno<-merge(LPS_Basal_DE_Sites, Nav_anno, by ="ESid")
+# Taking every ".xx" out to match with gencode
+LPS_Basal_DE_Sites_anno$GENEID<-gsub("\\..*","",LPS_Basal_DE_Sites_anno$GENEID) 
+
+# LPS Limma Sites + annotation + gencode
+LPS_Basal_DE_Sites_anno_gencode<-merge(LPS_Basal_DE_Sites_anno, gencode, by = "GENEID")
+filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable")
+write.table(LPS_Basal_DE_Sites_anno_gencode, 
+            file = file.path(filepath,"LPS_Basal_DE_Sites.tsv"), 
+            row.names = F, sep = "\t", quote = F)
+```
+
+
+```{r stim_11, echo=TRUE, message=FALSE, warning=FALSE}
+LPS_Basal_DEG<-read_tsv("Stim/TopTable/LPS_Basal_DEG.tsv")
+# Taking every ".xx" out to match with gencode+anno+DES matrix
+LPS_Basal_DEG$GENEID<-gsub("\\..*","",LPS_Basal_DEG$GENEID)
+
+LPS_Basal_DE_Sites<-read_tsv("Stim/TopTable/LPS_Basal_DE_Sites.tsv")
+
+number<-length(intersect(LPS_Basal_DEG$GENEID, LPS_Basal_DE_Sites$GENEID)) 
+gene<-intersect(LPS_Basal_DEG$GENEID, LPS_Basal_DE_Sites$GENEID)
+
+string_1<-"Number of Gene that is present in both Stimulation Monocyte DEG and DES:"
+print(paste0(string_1,number))
+```
+
+```{r stim_12, echo=TRUE, message=FALSE, warning=FALSE}
+LPS_Basal_DEG_match<-LPS_Basal_DEG%>%
+  dplyr::filter(GENEID %in%LPS_Basal_DE_Sites$GENEID)%>%
+  dplyr::select(-c(AveExpr, B, t, DE_direction))
+
+LPS_Basal_DE_Sites_match<-LPS_Basal_DE_Sites%>%
+  dplyr::filter(GENEID %in% LPS_Basal_DEG$GENEID)%>%
+  dplyr::select(-c(AveExpr, B, t))
+
+# DES
+LPS_Basal_DE_Sites_match<-LPS_Basal_DE_Sites_match%>%
+  dplyr::select(c(GENEID,logFC,location,GENENAME,ESid,mutation))%>%
+  dplyr::rename("logFC_DESites"="logFC" )%>%
+  dplyr::rename("GENENAME_DES"="GENENAME")
+LPS_Basal_DE_Sites_match$Editing_Index<-str_split_fixed(LPS_Basal_DE_Sites_match$ESid, ":", 3)[,3]
+LPS_Basal_DE_Sites_match$Editing_Index<-gsub("T:C","A:G",LPS_Basal_DE_Sites_match$Editing_Index)
+LPS_Basal_DE_Sites_match$Editing_Index<-gsub("G:A","C:T",LPS_Basal_DE_Sites_match$Editing_Index)
+
+# DEG
+LPS_Basal_DEG_match<-LPS_Basal_DEG_match%>%
+  dplyr::select(c(GENEID,logFC,GENENAME))%>%
+  dplyr::rename("logFC_DEGenes" = "logFC")%>%
+  dplyr::rename("GENENAME_DEG" = "GENENAME")
+
+LPS_DEG_DES<-merge(LPS_Basal_DE_Sites_match, LPS_Basal_DEG_match, by = "GENEID")
+
+LPS_DEG_DES$Qudrat<-case_when(
+    LPS_DEG_DES$logFC_DESites >0 & LPS_DEG_DES$logFC_DEGenes >0 ~ 'Q_1',
+    LPS_DEG_DES$logFC_DESites <0 & LPS_DEG_DES$logFC_DEGenes >0 ~ 'Q_2',
+    LPS_DEG_DES$logFC_DESites <0 & LPS_DEG_DES$logFC_DEGenes <0 ~ 'Q_3',
+    LPS_DEG_DES$logFC_DESites >0 & LPS_DEG_DES$logFC_DEGenes <0 ~ 'Q_4')
+
+LPS_DEG_DES<-LPS_DEG_DES%>%dplyr::rename("Mutation" = "mutation")
+LPS_DEG_DES<-LPS_DEG_DES%>%dplyr::rename("Location" = "location")
+LPS_DEG_DES$Mutation[LPS_DEG_DES$Mutation == "."]<-"Noncoding"
+LPS_DEG_DES$Mutation[LPS_DEG_DES$Mutation == "stopgain"]<-"Stopgain"
+LPS_DEG_DES$Mutation[LPS_DEG_DES$Mutation == "nonsynonymous SNV"]<-"Nonsynonymous SNV"
+LPS_DEG_DES$Mutation[LPS_DEG_DES$Mutation == "synonymous SNV"]<-"Synonymous SNV"
+
+filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable"
+write_tsv(LPS_DEG_DES, file = file.path(filepath, "LPS_DEG_DES_match.tsv"))
+```
+
+
+```{r stim_13, echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+mut_logfc_plot<-function(table_in,point_size,text_size, plot_title, legend_size, legend_text_size, label_size){
+  t<-read_tsv(table_in)
+  highlight_df<-t%>%dplyr::filter(grepl("Nonsynonymous SNV", Mutation))
+  highlight_df<-highlight_df%>%dplyr::filter(logFC_DESites < -0.1)
+  logfc_plot<-ggplot(t, aes(x=logFC_DESites, y =logFC_DEGenes, shape=Editing_Index))+ 
+    theme_bw()+
+    geom_jitter(aes(color=Mutation),alpha=0.7, size = point_size)+
+    labs(title=plot_title) +
+    theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+    theme(text = element_text(size = text_size)) + 
+    geom_vline(xintercept=c(0,0),linetype = "solid",col ="grey")+
+    geom_hline(yintercept = c(0,0), linetype = "solid",col="grey")+
+    guides(color = guide_legend(title = "Mutation")) +
+    theme(legend.key.size = unit(legend_size,'cm'),
+        legend.title = element_text(color = "black", size = legend_text_size),
+        legend.text = element_text(color = "black", size = legend_text_size))+
+     guides(color = guide_legend(override.aes = list(size = 7)))+
+    geom_label_repel(data = highlight_df, aes(label = GENENAME_DES),
+                  box.padding   = 0, point.padding = 0,force = 80,
+                  segment.size  = 0.2,segment.color = "black",
+                  angle = 180,point.size =3,
+                  color="black",nudge_x=-0.2, hjust=0,
+                  size = label_size)
+  logfc_plot}
+
+loc_logfc_plot<-function(table_in,point_size,text_size,plot_title, legend_size, legend_text_size,label_size,inplot_text_size){
+  t<-read_tsv(table_in)
+  highlight_df<-t%>%dplyr::filter(grepl("Nonsynonymous SNV", Mutation))
+  highlight_df<-highlight_df%>%dplyr::filter(logFC_DESites < -0.1)
+  logfc_plot<-ggplot(t, aes(x=logFC_DESites, y =logFC_DEGenes)) + 
+    labs(fill = "Location")+
+    theme_bw()+
+    stat_cor(size =inplot_text_size, 
+  label.x.npc = "middle",
+  label.y.npc = "middle")+
+    geom_jitter(aes(color=Location),alpha=0.7, size = point_size)+
+    labs(title=plot_title) +
+    theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+    theme(text = element_text(size = text_size)) + 
+    geom_vline(xintercept=c(0,0),linetype = "solid",col ="grey")+
+    geom_hline(yintercept = c(0,0), linetype = "solid",col="grey")+
+    guides(color = guide_legend(title = "Location")) +
+    theme(legend.key.size = unit(legend_size,'cm'),
+        legend.title = element_text(color = "black", size = legend_text_size),
+        legend.text = element_text(color = "black", size = legend_text_size))+
+     guides(color = guide_legend(override.aes = list(size = 7)))+
+    geom_label_repel(data = highlight_df, aes(label = GENENAME_DES),
+                  box.padding   = 0, point.padding = 0,force  = 80,
+                  segment.size  = 0.2,segment.color = "black",
+                  angle = 180, point.size =3,
+                  color="black",nudge_x=-0.2, hjust=0,
+                  size = label_size)
+  logfc_plot}
+
+```
+
+
+
+### Fisher Test 
+
+There is a statistically significant relationship between logFoldChange of DESites and DEGenes \
+Fisher Test is performed on "table(LPS_DES_DEG$logFC_DEG > 0,LPS_DES_DEG$logFC_DES > 0 )", and it also gives a conclusion that the relationship between logFC of DESites and DEGenes is not by chance. \
+
+
+```{r stim_14, echo=TRUE, message=FALSE, warning=FALSE}
+print("Fisher Test on logFC_DEGenes and logFC_DESites")
+LPS_DEG_DES<-read_tsv("Stim/TopTable/LPS_DEG_DES_match.tsv")
+# Fisher table
+fisher_table<-table(LPS_DEG_DES$logFC_DEGenes > 0,LPS_DEG_DES$logFC_DESites > 0 )
+fisher.test(fisher_table)
+```
+
+
+
+
+***
+
+
+
+## Pathway Comparison{.tabset .tabset-fade .tabset-pills} 
+
+Pathways of DEGenes and DESites (annotated by genename,and with relazed threshold) are analysed.
+Gprofiler uses custom domain, which is the vector of all gene names found in samples ( the subjects to the DEG analysis)
+
+```{r path_1, echo=FALSE, message=FALSE, warning=FALSE}
+all_gene_name<-read_tsv("Stim/Stimulated_All_Gene_Names.tsv")
+all_gene_name<-all_gene_name[['GENENAME']]
+
+gprofiler<-function(file_name){
+  df<-read_tsv(file_name)
+  df_up<-subset(df, logFC >0)
+  df_down<-subset(df, logFC <0)
+
+  gp_up<-gost(row.names(df_up),organism = "hsapiens",
+              domain_scope = "custom",
+              custom_bg=all_gene_name)
+  gp_down<-gost(row.names(df_down),organism ="hsapiens",
+              domain_scope = "custom",
+              custom_bg=all_gene_name)
+  
+  string_1<-"Number of UP regulated genes:"
+  num_1<-as.integer(nrow(df_up))
+  string_2<-"Number of DOWN regulated genes:"
+  num_2<-as.integer(nrow(df_down))
+  print(paste(string_1,num_1,string_2,num_2))
+  
+  multi_gp<- gost(list("up-regulated" = row.names(df_up),
+                       "down-regulated" = row.names(df_down)))
+  multi_gp
+}
+```
+
+
+```{r path_2, echo=FALSE, message=FALSE, warning=FALSE}
+process_path<-function(path){
+  path<-path%>%dplyr::filter(!grepl("GO:CC|GO:MF|CORUM|HPA|REAC|WP|HP|TF|MIRNA", path$source))
+  path$log_P_value<-(-log(path$p_value))
+  path<-path%>%dplyr::select(c(query, p_value,term_id,term_name, source,log_P_value))
+  path
+}
+
+pathway_source_plot<-function(path_in){
+  pathway_source<-path_in%>% 
+  ggplot(aes(x=source, y=log_P_value, fill = source))+ 
+  geom_boxplot()+
+  facet_wrap(~query, scales="free_y")+
+  theme_bw() +
+  theme(axis.text.x=element_blank())+
+  theme(text = element_text(size = 8))+
+  theme(strip.text.x = element_text(size=8))+
+  labs(title="Gene Pathway")+
+  theme(plot.title = element_text(size=15, face="bold", hjust=0.5))+
+  guides(color = guide_legend(override.aes = list(size = 2)))
+  pathway_source
+}
+```
+
+```{r path_3, echo= TRUE, message = FALSE, warning=FALSE}
+# abs(log_fc) > 1 dplyr::filter(score1>45 & score2>45)
+LPS_Basal_DEG<- read_tsv("Stim/TopTable/LPS_Basal_DEG.tsv")
+LPS_Basal_DES<- read_tsv("Stim/TopTable/LPS_Basal_DE_Sites.tsv")
+LPS_Basal_DES$DE_direction<-case_when(
+  LPS_Basal_DES$logFC > 0.00 ~ "UP",
+  LPS_Basal_DES$logFC < 0.00 ~ "DOWN"
+  )
+
+DE_UP_Count<-c( as.integer(length(which(LPS_Basal_DEG$DE_direction == "UP"))),
+               as.integer(length(which(LPS_Basal_DES$DE_direction == "UP"))))
+DE_DOWN_Count<-c( as.integer(length(which(LPS_Basal_DEG$DE_direction == "DOWN"))),
+                    as.integer(length(which(LPS_Basal_DES$DE_direction == "DOWN"))))
+
+Model<-c("LPS_Basal_DEGenes","LPS_Basal_DESites")
+Model_Formula<-c("condition + disease + batch + sex + age","condition + disease + batch + sex + age")
+Threshold<-c("(adj.P.Val<= 0.05), logFC>1", "(adj.P.Val<= 0.05)")
+df<-data.frame( Model, Model_Formula, Threshold,DE_UP_Count, DE_DOWN_Count)
+df
+```
+
+### DEGenes Pathway Plot {.tabset .tabset-fade .tabset-pills} 
+```{r path_4, echo=TRUE, message=FALSE, warning=FALSE}
+LPS_Basal_DEG_gp<-gprofiler("Stim/TopTable/LPS_Basal_DEG.tsv")
+LPS_Basal_DEG_gp_plot<-gostplot(LPS_Basal_DEG_gp, capped = TRUE, interactive = TRUE)
+LPS_Basal_DEG_gp_plot
+
+#LPS_Basal_DEG_gp <- LPS_Basal_DEG_gp$result%>%arrange(desc(precision))
+#filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/gp_data"
+#write_tsv(LPS_Basal_DEG_gp, file
+#         =file.path(filepath,"Custom_LPS_Basal_DEG_Path.tsv"))
+
+```
+
+
+```{r path_5, echo=TRUE, message=FALSE, warning=FALSE}
+LPS_Basal_DEG_gp<-read_tsv("Stim/gp_data/Custom_LPS_Basal_DEG_Path.tsv")
+LPS_Basal_DEG_gp<-process_path(LPS_Basal_DEG_gp)
+
+down<-LPS_Basal_DEG_gp%>%dplyr::filter(grepl("down-regulated",query))
+down_go<-down%>%dplyr::filter(grepl("GO:BP",source))
+down_kegg<-down%>%dplyr::filter(grepl("KEGG",source))
+
+up<-LPS_Basal_DEG_gp%>%dplyr::filter(grepl("up-regulated",query))
+up_go<-up%>%dplyr::filter(grepl("GO:BP",source))
+up_kegg<-up%>%dplyr::filter(grepl("KEGG",source))
+
+name<-c("down_go","down_kegg","up_go","up_kegg")
+count<-c(nrow(down_go), nrow(down_kegg), nrow(up_go), nrow(up_kegg))
+mean<-c((mean(down_go$log_P_value)), (mean(down_kegg$log_P_value)), (mean(up_go$log_P_value)), (mean(up_kegg$log_P_value)))
+
+df<-data.frame(name, count, mean)
+knitr::kable(df, format = "simple", table.attr = "style='width:80%;'",caption = "LPS DEG Pathway",col.names=c('Direction_Source', "Count","Mean")) 
+```
+
+
+
+### DESites Pathway Plot {.tabset .tabset-fade .tabset-pills} 
+
+```{r path_6, echo=FALSE, message=FALSE, warning=FALSE}
+LPS_Basal_DESites_gp<-gprofiler("Stim/TopTable/LPS_Basal_DE_Sites.tsv")
+LPS_Basal_DESites_gp_plot<-gostplot(LPS_Basal_DESites_gp, capped = TRUE, interactive = TRUE)
+LPS_Basal_DESites_gp_plot
+
+#LPS_Basal_DESites_gp <- LPS_Basal_DESites_gp$result%>%arrange(desc(precision))
+#filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/gp_data"
+#write_tsv(LPS_Basal_DESites_gp, file
+#         =file.path(filepath,"Custom_LPS_Basal_DESites_Path.tsv"))
+```
+
+```{r path_7, echo=FALSE, message=FALSE, warning=FALSE}
+LPS_Basal_DESites_gp<-read_tsv("Stim/gp_data/Custom_LPS_Basal_DESites_Path.tsv")
+LPS_Basal_DESites_gp<-process_path(LPS_Basal_DESites_gp)
+
+down<-LPS_Basal_DESites_gp%>%
+  dplyr::filter(grepl("down-regulated",query))
+down_go<-down%>%dplyr::filter(grepl("GO:BP",source))
+down_kegg<-down%>%dplyr::filter(grepl("KEGG",source))
+
+up<-LPS_Basal_DESites_gp%>%dplyr::filter(grepl("up-regulated",query))
+up_go<-up%>%dplyr::filter(grepl("GO:BP",source))
+up_kegg<-up%>%dplyr::filter(grepl("KEGG",source))
+
+name<-c("down_go","down_kegg","up_go","up_kegg")
+count<-c(nrow(down_go), nrow(down_kegg), nrow(up_go), nrow(up_kegg))
+mean<-c((mean(down_go$log_P_value)), (mean(down_kegg$log_P_value)), (mean(up_go$log_P_value)), (mean(up_kegg$log_P_value)))
+
+df<-data.frame(name, count, mean)
+knitr::kable(df, format = "simple", table.attr = "style='width:80%;'",caption = "Basal Monocytes only P val DES Pathway",col.names=c('Direction_Source', "Count","Mean")) 
+```
+
+
+***
+
+
+### Matched Pathway Source {.tabset .tabset-fade .tabset-pills} 
+
+
+```{r path_8, echo=TRUE, message=FALSE, warning=FALSE}
+DEG_path<-read_tsv("Stim/gp_data/Custom_LPS_Basal_DEG_Path.tsv")
+DES_path<-read_tsv("Stim/gp_data/Custom_LPS_Basal_DESites_Path.tsv")
+
+DEG_path_match<-DEG_path%>%dplyr::filter(term_name %in% DES_path$term_name)
+DES_path_match<-DES_path%>%dplyr::filter(term_name %in% DEG_path$term_name)
+
+# 2161
+DEG_path<-process_path(DEG_path_match)%>%dplyr::rename("logP_DEG" = "log_P_value")
+# 2062
+DES_path<-process_path(DES_path_match)%>%dplyr::rename("logP_DES" = "log_P_value")
+
+# inner_join DEGene and DESite pathway by term id
+DEG_DES_path_go<-inner_join(DEG_path, DES_path, by = "term_id")%>%
+   dplyr::filter(!grepl("TF|CORUM", source.x))
+#filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable"
+#write_tsv(DEG_DES_path_go, file = file.path(filepath, "LPS_DEG_DES_path_match.tsv"))
+
+Path<-(c("DEG_path","DES_path","DEG_DES_inner_join"))
+
+Count<-(c(as.integer(nrow(DEG_path)), as.integer(nrow(DES_path)),as.integer(nrow(DEG_DES_path_go))))
+
+Unique_id<-(c(as.integer(length(unique(DEG_path$term_id))),
+              as.integer(length(unique(DES_path$term_id))),
+              as.integer(length(unique(DEG_DES_path_go$term_id)))))
+
+df<-data_frame(Path, Count, Unique_id)
+writeLines("td, th { padding : 6px } th { background-color : blue ; color : white; border : 1px solid white; } td { color : blue ; border : 1px solid blue }", con = "mystyle.css")
+knitr::kable(df, "simple", caption = "DEGenes_DESites_Shared_Gene_pathway", table.attr = "style='width:100%;'",col.names=c("Path", "Count","Unique ID"))
+
+knitr::kable(table(DEG_DES_path_go$source.x), "simple", caption = "_Shared_Gene_pathway_by_Source", table.attr = "style='width:100%;'",col.names=c("GO: source", "Count"))
+```
+
+```{r path_9, echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+path_pval_plot<-function(table_in,plot_title,point_size,text_size,title_text_size,inplot_text_size){
+  t<-read_tsv(table_in)
+  print(colnames(t))
+  plot<-ggplot(data= t, aes(x = t$logP_DEG, y = t$logP_DES))+
+  geom_point(aes(color=source.x),alpha=0.8,size = point_size)+
+  stat_cor(size = inplot_text_size,
+  label.x.npc = "left",
+  label.y.npc = "top")+
+     geom_smooth(method = "lm", se = FALSE, colour="black")+
+  theme_bw()+
+  facet_wrap(facets =~source.x, scales ='free')+
+    theme(text = element_text(size =text_size))+
+  labs(title = plot_title)+
+    theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5),
+        axis.title.x = element_text(size =text_size),
+        axis.title.y = element_text(size =text_size))+
+    xlab("logP_DEGene")+ylab("logP_DESite")+
+    theme(legend.position ='none')
+  plot
+}
+```
+
+
+## LPS All 
+
+
+```{r lps_1, echo=TRUE, message=FALSE, warning=FALSE}
+load("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/Rdata/Nav_156_gene_data.RData")
+load("/Users/hyominseo/Desktop/RAJ/Stim_Limma/Rdata/nav_data_1.RData") 
+
+tpm_limk<-tpm%>%dplyr::filter(grepl("ENSG00000182541", rownames(.)))
+tpm_limk<-as.data.frame(t(tpm_limk))
+tpm_limk<-tpm_limk%>%dplyr::rename("Expression_TPM"="ENSG00000182541.18")
+tpm_limk<-tpm_limk%>%mutate(Expression_TPM = log2(Expression_TPM+1))
+tpm_limk<-tpm_limk%>%rownames_to_column("Sample")
+
+editing_limk<-editing%>%dplyr::filter(grepl("chr22:31277021:T:C",rownames(.)))
+editing_limk<-editing_limk%>%dplyr::select(-c("editing_index"))
+editing_limk<-as.data.frame(t(editing_limk))
+editing_limk<-editing_limk%>%dplyr::rename("Editing_Rate"="chr22:31277021:T:C")
+editing_limk<-editing_limk%>%rownames_to_column("Sample")
+editing_limk<-editing_limk%>%dplyr::filter( Sample %in% tpm_limk$Sample)
+
+limk_merge <- merge(tpm_limk, editing_limk,by = "Sample")
+limk_merge$Condition<-str_split_fixed(limk_merge$Sample, "-", 3)[,3]
+limk_merge<-limk_merge%>%column_to_rownames("Sample")
+```
+
+
+
+```{r lps_2, echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+text_size =18
+title_text_size = 20
+point_size=5
+legend_size = 1
+legend_text_size = 15
+label_size = 6
+inplot_text_size =8
+
+lps_vol_plot<-vol_plot("Stim/TopTable/LPS_Basal.tsv",point_size, text_size, title_text_size, "Differentially Expressed Genes",label_size)
+
+lps_path_pval_plot<-path_pval_plot("Stim/TopTable/LPS_DEG_DES_path_match.tsv","DES and DEG Shared Pathways",point_size,text_size,title_text_size,inplot_text_size)
+
+lps_1_plot<-ggarrange(lps_vol_plot,lps_path_pval_plot,
+                      labels =c("A","B"),
+                      font.label=list(color="black",size= text_size),
+                      ncol=2)
+
+lps_1_plot<-annotate_figure(lps_1_plot, 
+                            top=text_grob("LPS-Stimulated Monocytes",
+                              color = "black", face = "bold", size =title_text_size))
+
+lps_mut_logfc_plot<-mut_logfc_plot("Stim/TopTable/LPS_DEG_DES_match.tsv",point_size,text_size, "Mutation",legend_size,legend_text_size, label_size)
+
+lps_loc_logfc_plot<-loc_logfc_plot("Stim/TopTable/LPS_DEG_DES_match.tsv",point_size,text_size, 
+                                   "Location", legend_size,legend_text_size, label_size,inplot_text_size)
+
+
+lps_2_plot<-ggarrange(lps_mut_logfc_plot, lps_loc_logfc_plot,
+                      labels =c("C","D"),
+                      font.label=list(color="black",size= text_size),
+                      ncol=2)
+
+lps_2_plot<-annotate_figure(lps_2_plot, 
+                            top=text_grob("DES and DEG Shared Genes Annotation",
+                              color = "black", face = "bold", size =title_text_size))
+
+tpm_rate_plot<-
+  ggplot(limk_merge,aes(x=Expression_TPM, y=Editing_Rate))+
+  theme_bw() +
+  geom_jitter(aes(color=Condition),alpha=0.8, size = 6)+
+  scale_color_manual(values = wes_palette(n=3,name="GrandBudapest1"))+
+  stat_cor(size = inplot_text_size,
+  label.x =6,
+  label.y.npc = "top")+
+  labs(x = "log(Expression TPM)", y = "RNA Editing Rate")+
+  theme(axis.text.x=element_text(size=text_size),
+        axis.text.y=element_text(size=text_size))+
+  theme(text = element_text(size =text_size))+
+  labs(title="Gene LIMK2 TPM vs Editing Rate")+
+  theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+  theme(legend.key.size = unit(2,'cm'),
+        legend.title = element_text(color = "black", size =20),
+        legend.text = element_text(color = "black", size = 20))+
+     guides(color = guide_legend(override.aes = list(size = 10)))
+
+tpm_rate_plot<-ggarrange(tpm_rate_plot,
+                      labels =c("E"),
+                      font.label=list(color="black",size= text_size))
+
+tpm_rate_plot<-annotate_figure(tpm_rate_plot, 
+                            top=text_grob("DES and DEG Shared Non-SNV",
+                              color = "black", face = "bold", size =title_text_size))
+
+lps_plot<-ggarrange(lps_1_plot,lps_2_plot,tpm_rate_plot,
+                    nrow=3)
+
+
+ggsave(plot=lps_plot,filename="Stim/Figures/figure2:lps_all_plot.jpg",width = 20, height = 15,dpi = 600)
+```
+
+### LPS Plots
+
+```{r lps_3, echo=FALSE, fig.cap="All plots for LPS Samples", out.width = '100%'}
+knitr::include_graphics("Stim/Figures/figure2:lps_all_plot.jpg")
+```
+
+
+
+
+### LPS Counts
+
+```{r lps_4, echo= TRUE, message = FALSE, warning=FALSE}
+LPS_Basal_DE_Sites<-read_tsv("Stim/TopTable/LPS_1_toptable.tsv")%>%
+  dplyr::filter(adj.P.Val <= 0.05)
+
+LPS_Basal_DE_Sites_Gene<-read_tsv("Stim/TopTable/LPS_Basal_DE_Sites.tsv")
+LPS_Basal_DEG<-read_tsv("Stim/TopTable/LPS_Basal_DEG.tsv")
+
+Category<-c("DE_Sites, Site count", "DE_Sites_Gencode_Annotated, Gene count", "DE_Genes, Gene count")
+Threshold<-c("adj.P < 0.05","adj.P < 0.05","adj.P.Val < 0.05 & abs(logFC) > 1")
+
+Count<-c(as.integer(nrow(LPS_Basal_DE_Sites)), as.integer(nrow(LPS_Basal_DE_Sites_Gene)),
+         as.integer(nrow(LPS_Basal_DEG)))
+
+Unique_Gene<- c("All Sites Unique",as.integer(length(unique(LPS_Basal_DE_Sites_Gene$GENENAME))),
+                as.integer(length(unique(LPS_Basal_DEG$GENENAME))))
+
+df<-data.frame(Threshold, Category, Count, Unique_Gene)
+knitr::kable(df, "simple", caption = "LPS: All Count", table.attr = "style='width:100%;'")
+```
+
+
+
+
+
+
+***
+
+
+## IFNb_Basal
+
+* The black dots are the A~ genes (10 genes)
+* Threshold for determining Significantly Expressed Genes : adj.P.Val < 0.05 & abs(t$logFC) > 1
+
+```{r ifnb_1, echo= TRUE, message = FALSE, warning=FALSE, eval=FALSE}
+text_size =10
+title_text_size = 12
+point_size=2
+legend_size = 0.8
+legend_text_size = 15
+label_size = 4
+
+ifnb_vol_plot<-vol_plot("Stim/TopTable/IFNb_Basal.tsv",point_size, text_size, title_text_size, "IFNb Stimulated Monocytes",label_size)
+
+ifnb_vol_plot<-ggarrange(ifnb_vol_plot,
+                              labels=c("A"),
+                              font.label=list(color="black",size= text_size))
+
+ggsave(plot=ifnb_vol_plot,filename="Stim/Figures/figure3:ifnb_vol_plot.jpg",width = 10, height = 5,dpi = 600)
+```
+
+```{r ifnb_2, echo=TRUE, fig.cap="IFNb DEGenes volcano plot", out.width = '100%'}
+knitr::include_graphics("Stim/Figures/figure3:ifnb_vol_plot.jpg")
+```
+
+```{r ifnb_3, echo= TRUE, message = FALSE, warning=FALSE}
+ifnb_DEG<- read_tsv("Stim/TopTable/IFNb_Basal_DEG.tsv")
+
+DE_UP_Count<-c( as.integer(length(which(ifnb_DEG$DE_direction == "UP"))))
+DE_DOWN_Count<-c( as.integer(length(which(ifnb_DEG$DE_direction == "DOWN"))))
+
+Model<-c("IFNb_Basal")
+Model_Formula<-c("condition + batch + sex + age")
+df<-data.frame( Model, Model_Formula, DE_UP_Count, DE_DOWN_Count)
+df
+
+ifnb_DEG_a<-ifnb_DEG%>%dplyr::filter(grepl("ADAR.*|APOBEC.*", GENENAME))
+ifnb_DEG_a<-ifnb_DEG_a%>%dplyr::select(-c(AveExpr, t, B,DE_genes))%>%arrange(desc(logFC))
+knitr::kable(ifnb_DEG_a, "simple", caption = "A~ genes IFNb_DEG", table.attr = "style='width:100%;'")
+```
+
+
+
+***
+
+
+## IFNb : DEG and DES Shared Genes
+```{r ifnb_4, echo=TRUE, message=FALSE, warning=FALSE, eval = FALSE}
+# LIMMA SITES : 3799 DE sites (adj.P.Val<= 0.05)
+IFNb_Basal_DE_Sites<-read_tsv("Stim/TopTable/IFNb_1_toptable.tsv")%>%
+  dplyr::filter(adj.P.Val<= 0.05)
+
+# Adding DESite toptable + Annotation
+IFNb_Basal_DE_Sites_anno<-merge(IFNb_Basal_DE_Sites, Nav_anno, by ="ESid")
+# Taking every ".xx" out to match with gencode
+IFNb_Basal_DE_Sites_anno$GENEID<-gsub("\\..*","",IFNb_Basal_DE_Sites_anno$GENEID) 
+
+IFNb_Basal_DE_Sites_anno_gencode<-merge(IFNb_Basal_DE_Sites_anno, gencode, by = "GENEID")
+filepath<-file.path("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable")
+write.table(IFNb_Basal_DE_Sites_anno_gencode, file = file.path(filepath,"IFNb_Basal_DE_Sites.tsv"), 
+              row.names = F, sep = "\t", quote = F)
+```
+
+
+```{r ifnb_5, echo=TRUE, message=FALSE, warning=FALSE}
+IFNb_Basal_DEG<-read_tsv("Stim/TopTable/IFNb_Basal_DEG.tsv")
+# Taking every ".xx" out to match with gencode+anno+DES matrix
+IFNb_Basal_DEG$GENEID<-gsub("\\..*","",IFNb_Basal_DEG$GENEID)
+
+IFNb_Basal_DE_Sites<-read_tsv("Stim/TopTable/IFNb_Basal_DE_Sites.tsv")
+
+number<-length(intersect(IFNb_Basal_DEG$GENEID, IFNb_Basal_DE_Sites$GENEID)) 
+gene<-intersect(IFNb_Basal_DEG$GENEID, IFNb_Basal_DE_Sites$GENEID)
+
+string_1<-"Number of Gene that is present in both Stimulation Monocyte DEG and DES:"
+print(paste0(string_1,number))
+```
+
+
+```{r ifnb_6, echo=FALSE, message=FALSE, warning=FALSE, eval = FALSE}
+IFNb_Basal_DEG_match<-IFNb_Basal_DEG%>%
+  dplyr::filter(GENEID %in% IFNb_Basal_DE_Sites$GENEID)%>%
+  dplyr::select(-c(AveExpr, B, t, DE_direction))
+
+IFNb_Basal_DE_Sites_match<-IFNb_Basal_DE_Sites%>%
+  dplyr::filter(GENEID %in% IFNb_Basal_DEG$GENEID)%>%
+  dplyr::select(-c(AveExpr, B, t))
+
+# DES
+IFNb_Basal_DE_Sites_match<-IFNb_Basal_DE_Sites_match%>%
+  dplyr::select(c(GENEID,logFC,location,GENENAME,ESid,mutation))%>%
+  dplyr::rename("logFC_DESites"="logFC" )%>%
+  dplyr::rename("GENENAME_DES"="GENENAME")
+IFNb_Basal_DE_Sites_match$Editing_Index<-str_split_fixed(IFNb_Basal_DE_Sites_match$ESid, ":", 3)[,3]
+IFNb_Basal_DE_Sites_match$Editing_Index<-gsub("T:C","A:G",IFNb_Basal_DE_Sites_match$Editing_Index)
+IFNb_Basal_DE_Sites_match$Editing_Index<-gsub("G:A","C:T",IFNb_Basal_DE_Sites_match$Editing_Index)
+
+# DEG
+IFNb_Basal_DEG_match<-IFNb_Basal_DEG_match%>%
+  dplyr::select(c(GENEID,logFC,GENENAME))%>%
+  dplyr::rename("logFC_DEGenes" = "logFC")%>%
+  dplyr::rename("GENENAME_DEG" = "GENENAME")
+
+IFNb_DEG_DES<-merge(IFNb_Basal_DE_Sites_match, IFNb_Basal_DEG_match, by = "GENEID")
+
+IFNb_DEG_DES$Qudrat<-case_when(
+    IFNb_DEG_DES$logFC_DESites >0 & IFNb_DEG_DES$logFC_DEGenes >0 ~ 'Q_1',
+    IFNb_DEG_DES$logFC_DESites <0 & IFNb_DEG_DES$logFC_DEGenes >0 ~ 'Q_2',
+    IFNb_DEG_DES$logFC_DESites <0 & IFNb_DEG_DES$logFC_DEGenes <0 ~ 'Q_3',
+    IFNb_DEG_DES$logFC_DESites >0 & IFNb_DEG_DES$logFC_DEGenes <0 ~ 'Q_4')
+
+
+IFNb_DEG_DES<-IFNb_DEG_DES%>%dplyr::rename("Mutation" = "mutation")
+IFNb_DEG_DES<-IFNb_DEG_DES%>%dplyr::rename("Location" = "location")
+IFNb_DEG_DES$Mutation[IFNb_DEG_DES$Mutation == "."]<-"Noncoding"
+IFNb_DEG_DES$Mutation[IFNb_DEG_DES$Mutation == "stopgain"]<-"Stopgain"
+IFNb_DEG_DES$Mutation[IFNb_DEG_DES$Mutation == "nonsynonymous SNV"]<-"Nonsynonymous SNV"
+IFNb_DEG_DES$Mutation[IFNb_DEG_DES$Mutation == "synonymous SNV"]<-"Synonymous SNV"
+
+filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable"
+write_tsv(IFNb_DEG_DES, file = file.path(filepath, "IFNb_DEG_DES_match.tsv"))
+```
+
+
+
+
+```{r ifnb_7, echo=TRUE, message=FALSE, warning=FALSE}
+mut_logfc_plot<-function(table_in,point_size,text_size, plot_title, legend_size, legend_text_size, label_size,highlight_df){
+  t<-read_tsv(table_in)
+  t<-t%>%dplyr::filter(!grepl("Noncoding",Mutation))
+  logfc_plot<-ggplot(t, aes(x=logFC_DESites, y =logFC_DEGenes, shape=Editing_Index))+ 
+    theme_bw()+
+    geom_jitter(aes(color=Mutation),alpha=0.7, size = point_size)+
+    labs(title=plot_title) +
+    theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+    theme(text = element_text(size = text_size)) + 
+    geom_vline(xintercept=c(0,0),linetype = "solid",col ="grey")+
+    geom_hline(yintercept = c(0,0), linetype = "solid",col="grey")+
+    guides(color = guide_legend(title = "Mutation (w/o Noncoding)")) +
+    theme(legend.key.size = unit(legend_size,'cm'),
+        legend.title = element_text(color = "black", size = legend_text_size),
+        legend.text = element_text(color = "black", size = legend_text_size))+
+     guides(color = guide_legend(override.aes = list(size = 7)))+
+    geom_label_repel(data = highlight_df, aes(label = GENENAME_DES),
+                  box.padding   = 1,  point.padding = 0,force = 80,
+                  segment.size  = 0.2,segment.color = "black",
+                  angle = 180,point.size =3,color="black",
+                  size = label_size)
+  logfc_plot}
+
+loc_logfc_plot<-function(table_in,point_size,text_size,plot_title, legend_size, legend_text_size,label_size,inplot_text_size,highlight_df){
+  t<-read_tsv(table_in)
+  logfc_plot<-ggplot(t, aes(x=logFC_DESites, y =logFC_DEGenes)) + 
+    labs(fill = "Location")+
+    theme_bw()+
+    stat_cor(size =inplot_text_size, 
+  label.x =0.25,
+  label.y = -5.0)+
+    geom_jitter(aes(color=Location),alpha=0.7, size = point_size)+
+    labs(title=plot_title) +
+    theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+    theme(text = element_text(size = text_size)) + 
+    geom_vline(xintercept=c(0,0),linetype = "solid",col ="grey")+
+    geom_hline(yintercept = c(0,0), linetype = "solid",col="grey")+
+    guides(color = guide_legend(title = "Location")) +
+    theme(legend.key.size = unit(legend_size,'cm'),
+        legend.title = element_text(color = "black", size = legend_text_size),
+        legend.text = element_text(color = "black", size = legend_text_size))+
+     guides(color = guide_legend(override.aes = list(size = 7)))+
+    geom_label_repel(data = highlight_df, aes(label = GENENAME_DES),
+                  box.padding   = 1,  point.padding = 0,force = 80,
+                  segment.size  = 0.2,segment.color = "black",
+                  angle = 180,point.size =3,color="black",
+                  size = label_size)
+  logfc_plot}
+
+```
+
+
+
+
+
+
+
+
+***
+
+
+### Fisher Test
+There is a statistically significant relationship between logFoldChange of DESites and DEGenes \
+Fisher Test is performed on "table(LPS_DES_DEG$logFC_DEG > 0,LPS_DES_DEG$logFC_DES > 0 )", and it also gives a conclusion that the relationship between logFC of DESites and DEGenes is not by chance. \
+
+```{r ifnb_11, echo=TRUE, message=FALSE, warning=FALSE}
+print("Fisher Test on IFNb DESites and DEGenes logFC:")
+# Fisher table
+IFNb_DEG_DES<- read_tsv("Stim/TopTable/IFNb_DEG_DES_match.tsv")
+fisher_table<-table(IFNb_DEG_DES$logFC_DEGenes > 0,IFNb_DEG_DES$logFC_DESites > 0 )
+fisher.test(fisher_table)
+```
+
+
+
+***
+
+## Pathway Comparison {.tabset .tabset-fade .tabset-pills} 
+
+Pathways of DEGenes and DESites (annotated by genename,and with relazed threshold) are analysed. 
+
+```{r path_10, echo= TRUE, message = FALSE, warning=FALSE}
+# abs(log_fc) > 1 dplyr::filter(score1>45 & score2>45)
+IFNb_Basal_DEG<- read_tsv("Stim/TopTable/IFNb_Basal_DEG.tsv")
+IFNb_Basal_DES<- read_tsv("Stim/TopTable/IFNb_Basal_DE_Sites.tsv")
+IFNb_Basal_DES$DE_direction<-case_when(
+  IFNb_Basal_DES$logFC > 0.00 ~ "UP",
+  IFNb_Basal_DES$logFC < 0.00 ~ "DOWN"
+  )
+
+DE_UP_Count<-c( as.integer(length(which(IFNb_Basal_DEG$DE_direction == "UP"))),
+               as.integer(length(which(IFNb_Basal_DES$DE_direction == "UP"))))
+DE_DOWN_Count<-c( as.integer(length(which(IFNb_Basal_DEG$DE_direction == "DOWN"))),
+                    as.integer(length(which(IFNb_Basal_DES$DE_direction == "DOWN"))))
+
+Model<-c("IFNb_Basal_DEGenes","IFNb_Basal_DESites")
+Model_Formula<-c("condition + disease + batch + sex + age","condition + disease + batch + sex + age")
+Threshold<-c("(adj.P.Val<= 0.05), logFC>1", "(adj.P.Val<= 0.05)")
+df<-data.frame( Model, Model_Formula, Threshold,DE_UP_Count, DE_DOWN_Count)
+df
+```
+
+### DEGenes Pathway Plot {.tabset .tabset-fade .tabset-pills} 
+```{r path_11, echo=FALSE, message=FALSE, warning=FALSE}
+IFNb_Basal_DEG_gp<-gprofiler("Stim/TopTable/IFNb_Basal_DEG.tsv")
+IFNb_Basal_DEG_gp_plot<-gostplot(IFNb_Basal_DEG_gp, capped = TRUE, interactive = TRUE)
+IFNb_Basal_DEG_gp_plot
+#IFNb_Basal_DEG_gp <- IFNb_Basal_DEG_gp$result%>%arrange(desc(precision))
+#filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/gp_data"
+#write_tsv(IFNb_Basal_DEG_gp, file =file.path(filepath,"Custom_IFNb_Basal_DEG_Path.tsv"))
+```
+
+```{r path_12, echo=FALSE, message=FALSE, warning=FALSE}
+IFNb_Basal_DEG_gp<-read_tsv("Stim/gp_data/Custom_IFNb_Basal_DEG_Path.tsv")
+IFNb_Basal_DEG_gp<-process_path(IFNb_Basal_DEG_gp)
+
+down<-IFNb_Basal_DEG_gp%>%dplyr::filter(grepl("down-regulated",query))
+down_go<-down%>%dplyr::filter(grepl("GO:BP",source))
+down_kegg<-down%>%dplyr::filter(grepl("KEGG",source))
+
+up<-IFNb_Basal_DEG_gp%>%dplyr::filter(grepl("up-regulated",query))
+up_go<-up%>%dplyr::filter(grepl("GO:BP",source))
+up_kegg<-up%>%dplyr::filter(grepl("KEGG",source))
+
+name<-c("down_go","down_kegg","up_go","up_kegg")
+count<-c(nrow(down_go), nrow(down_kegg), nrow(up_go), nrow(up_kegg))
+mean<-c((mean(down_go$log_P_value)), (mean(down_kegg$log_P_value)), (mean(up_go$log_P_value)), (mean(up_kegg$log_P_value)))
+
+df<-data.frame(name, count, mean)
+knitr::kable(df, format = "simple", table.attr = "style='width:80%;'",caption = "IFNb-Stimulated Monocytes only P val DEG Pathway",col.names=c('Direction_Source', "Count","Mean")) 
+```
+
+
+
+
+
+### DESites Pathway Plot {.tabset .tabset-fade .tabset-pills} 
+
+```{r path_13, echo=FALSE, message=FALSE, warning=FALSE}
+IFNb_Basal_DESites_gp<-gprofiler("Stim/TopTable/IFNb_Basal_DE_Sites.tsv")
+IFNb_Basal_DESites_gp_plot<-gostplot(IFNb_Basal_DESites_gp, capped = TRUE, interactive = TRUE)
+IFNb_Basal_DESites_gp_plot
+#IFNb_Basal_DESites_gp <- IFNb_Basal_DESites_gp$result%>%arrange(desc(precision))
+#filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/gp_data"
+#write_tsv(IFNb_Basal_DESites_gp, file
+#          =file.path(filepath,"Custom_IFNb_Basal_DESites_Path.tsv"))
+```
+
+
+```{r path_14, echo=FALSE, message=FALSE, warning=FALSE}
+IFNb_Basal_DESites_gp<-read_tsv("Stim/gp_data/Custom_IFNb_Basal_DESites_Path.tsv")
+IFNb_Basal_DESites_gp<-process_path(IFNb_Basal_DESites_gp)
+
+down<-IFNb_Basal_DESites_gp%>%
+  dplyr::filter(grepl("down-regulated",query))
+down_go<-down%>%dplyr::filter(grepl("GO:BP",source))
+down_kegg<-down%>%dplyr::filter(grepl("KEGG",source))
+
+up<-IFNb_Basal_DESites_gp%>%dplyr::filter(grepl("up-regulated",query))
+up_go<-up%>%dplyr::filter(grepl("GO:BP",source))
+up_kegg<-up%>%dplyr::filter(grepl("KEGG",source))
+
+name<-c("down_go","down_kegg","up_go","up_kegg")
+count<-c(nrow(down_go), nrow(down_kegg), nrow(up_go), nrow(up_kegg))
+mean<-c((mean(down_go$log_P_value)), (mean(down_kegg$log_P_value)), (mean(up_go$log_P_value)), (mean(up_kegg$log_P_value)))
+
+df<-data.frame(name, count, mean)
+knitr::kable(df, format = "simple", table.attr = "style='width:80%;'",caption = "Basal Monocytes only P val DES Pathway",col.names=c('Direction_Source', "Count","Mean")) 
+```
+
+
+
+
+
+### Matched Pathway Source {.tabset .tabset-fade .tabset-pills} 
+
+There exist a statically significant relation between logP of DEGenes pathway and DESites pathway for  sources GO Biological Process and KEGG
+
+```{r path_15, echo=TRUE, message=FALSE, warning=FALSE}
+DEG_path<-read_tsv("Stim/gp_data/Custom_IFNb_Basal_DEG_Path.tsv")
+DES_path<-read_tsv("Stim/gp_data/Custom_IFNb_Basal_DESites_Path.tsv")
+
+DEG_path_match<-DEG_path%>%dplyr::filter(term_name %in% DES_path$term_name)
+DES_path_match<-DES_path%>%dplyr::filter(term_name %in% DEG_path$term_name)
+
+# 3800
+DEG_path<-process_path(DEG_path_match)%>%dplyr::rename("logP_DEG" = "log_P_value")
+# 2932
+DES_path<-process_path(DES_path_match)%>%dplyr::rename("logP_DES" = "log_P_value")
+
+# inner_join DEGene and DESite pathway by term id 
+DEG_DES_path_go<-inner_join(DEG_path, DES_path, by = "term_id")%>%
+  # filter MIRNA and TF because there are only 2 each 
+  dplyr::filter(!grepl("MIRNA|TF|CORUM|HP", source.x))
+#filepath<-"/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/TopTable"
+#write_tsv(DEG_DES_path_go, file = file.path(filepath, "IFNb_DEG_DES_path_match.tsv"))
+
+Path<-(c("DEG_path","DES_path","DEG_DES_inner_join"))
+
+Count<-(c(as.integer(nrow(DEG_path)), as.integer(nrow(DES_path)),as.integer(nrow(DEG_DES_path_go))))
+
+Unique_id<-(c(as.integer(length(unique(DEG_path$term_id))),
+              as.integer(length(unique(DES_path$term_id))),
+              as.integer(length(unique(DEG_DES_path_go$term_id)))))
+
+df<-data_frame(Path, Count, Unique_id)
+writeLines("td, th { padding : 6px } th { background-color : blue ; color : white; border : 1px solid white; } td { color : blue ; border : 1px solid blue }", con = "mystyle.css")
+knitr::kable(df, "simple", caption = "DEGenes_DESites_pathway", table.attr = "style='width:100%;'",col.names=c("Path", "Count","Unique ID"))
+
+knitr::kable(table(DEG_DES_path_go$source.x), "simple", caption = "IFNb : DEGenes_DESites_mathed pathway", table.attr = "style='width:100%;'",col.names=c("GO: source", "Count"))
+```
+
+
+
+## IFNb All
+
+```{r ifnb_8, echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+load("/Users/hyominseo/Desktop/RAJ/Gene_Differential/Stim/Rdata/Nav_156_gene_data.RData")
+#	APOBEC3F in IFNB DEG : ENSG00000128394.17
+tpm_3f<-tpm%>%dplyr::filter(grepl("ENSG00000128394", rownames(.)))
+tpm_3f<-as.data.frame(t(tpm_3f))
+tpm_3f<-tpm_3f%>%dplyr::rename("Expression_TPM"="ENSG00000128394.17")
+tpm_3f<-tpm_3f%>%rownames_to_column("Sample")
+tpm_3f<-tpm_3f%>%mutate(Expression_TPM = log2(Expression_TPM+1))
+
+editing_3f_stop<-editing%>%dplyr::filter(grepl("chr22:39052279:G:A",rownames(.)))
+editing_3f_stop<-editing_3f_stop%>%dplyr::select(-c("editing_index"))
+editing_3f_stop<-as.data.frame(t(editing_3f_stop))
+editing_3f_stop<-editing_3f_stop%>%dplyr::rename("Editing_Rate"="chr22:39052279:G:A")
+editing_3f_stop<-editing_3f_stop%>%rownames_to_column("Sample")
+editing_3f_stop<-editing_3f_stop%>%dplyr::filter( Sample %in% tpm_3f$Sample)
+
+apobec3f_merge_stop <- merge(tpm_3f, editing_3f_stop,by = "Sample")
+apobec3f_merge_stop$Condition<-str_split_fixed(apobec3f_merge_stop$Sample, "-", 3)[,3]
+
+#	APOBEC3B in IFNB DEG : 	ENSG00000179750.16
+tpm_3b<-tpm%>%dplyr::filter(grepl("ENSG00000179750", rownames(.)))
+tpm_3b<-as.data.frame(t(tpm_3b))
+tpm_3b<-tpm_3b%>%dplyr::rename("Expression_TPM"="ENSG00000179750.16")
+tpm_3b<-tpm_3b%>%mutate(Expression_TPM = log2(Expression_TPM+1))
+tpm_3b<-tpm_3b%>%rownames_to_column("Sample")
+
+editing_3b_non<-editing%>%dplyr::filter(grepl("chr22:38989603:G:A",rownames(.)))
+editing_3b_non<-editing_3b_non%>%dplyr::select(-c("editing_index"))
+editing_3b_non<-as.data.frame(t(editing_3b_non))
+editing_3b_non<-editing_3b_non%>%dplyr::rename("Editing_Rate"="chr22:38989603:G:A")
+editing_3b_non<-editing_3b_non%>%rownames_to_column("Sample")
+editing_3b_non<-editing_3b_non%>%dplyr::filter( Sample %in% tpm_3b$Sample)
+
+apobec3b_merge_non <- merge(tpm_3b, editing_3b_non,by = "Sample")
+apobec3b_merge_non$Condition<-str_split_fixed(apobec3b_merge_non$Sample, "-", 3)[,3]
+
+batch<-meta%>%dplyr::select(sample, Batch)
+batch<-batch%>%dplyr::rename("Sample"="sample")
+apobec3b_merge_non<-merge(apobec3b_merge_non, batch, by ="Sample")
+```
+
+
+
+
+
+```{r ifnb_9, echo=TRUE, message=FALSE, warning=FALSE, eval=FALSE}
+text_size =18
+title_text_size = 20
+point_size=5
+legend_size = 1
+legend_text_size = 15
+label_size = 5.5
+inplot_text_size =7.5
+
+ifnb_vol_plot<-vol_plot("Stim/TopTable/IFNb_Basal.tsv",point_size, text_size, title_text_size, "Differentially Expressed Genes",label_size)
+
+ifnb_path_pval_plot<-path_pval_plot("Stim/TopTable/IFNb_DEG_DES_path_match.tsv","DES and DEG Shared Pathways",point_size,text_size,title_text_size,inplot_text_size)
+
+ifnb_1_plot<-ggarrange(ifnb_vol_plot,ifnb_path_pval_plot,
+                      labels =c("A","B"),
+                      font.label=list(color="black",size= text_size), 
+                      ncol=2)
+
+IFNb_DEG_DES<-read_tsv("Stim/TopTable/IFNb_DEG_DES_match.tsv")
+ifnb_non<-IFNb_DEG_DES%>%dplyr::filter(grepl("Nonsynonymous|Stopgain", Mutation))
+ifnb_non<-ifnb_non%>%dplyr::filter(grepl("APOBEC*", GENENAME_DES))
+
+ifnb_mut_logfc_plot<-mut_logfc_plot("Stim/TopTable/IFNb_DEG_DES_match.tsv",point_size,text_size, "Mutation (w/o Noncoding)", legend_size,legend_text_size,label_size, ifnb_non)
+
+ifnb_loc_logfc_plot<-loc_logfc_plot("Stim/TopTable/IFNb_DEG_DES_match.tsv",point_size,text_size, "Location",legend_size,legend_text_size,label_size,inplot_text_size,ifnb_non)
+
+ifnb_2_plot<-ggarrange(ifnb_mut_logfc_plot, ifnb_loc_logfc_plot,
+                      labels =c("C","D"),
+                      font.label=list(color="black",size= text_size),
+                      ncol=2)
+ifnb_2_plot<-annotate_figure(ifnb_2_plot, 
+                            top=text_grob("DES and DEG Shared Genes Annotation",
+                              color = "black", face = "bold", size
+                              =title_text_size))
+
+tpm_rate_plot_3f<-
+  ggplot(apobec3f_merge_stop,aes(x=Expression_TPM, y=Editing_Rate))+
+  theme_bw() +
+  geom_jitter(aes(color=Condition),alpha=0.8, size = 6)+
+  scale_color_manual(values = wes_palette(n=3,name="GrandBudapest1"))+
+  stat_cor(size = inplot_text_size,
+  label.x =4.3,
+  label.y.npc = "middle")+
+  labs(x = "log(Expression TPM)", y = "RNA Editing Rate")+
+  theme(axis.text.x=element_text(size=text_size),
+        axis.text.y=element_text(size=text_size))+
+  theme(text = element_text(size =text_size))+
+  labs(title="APOBEC3F Stopgain: TPM vs Editing Rate")+
+  theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+  theme(legend.key.size = unit(legend_size,'cm'),
+        legend.title = element_text(color = "black", size =legend_text_size),
+        legend.text = element_text(color = "black", size = legend_text_size))+
+     guides(color = guide_legend(override.aes = list(size = 7)))
+
+tpm_rate_plot_3b<-
+  ggplot(apobec3b_merge_non,aes(x=Expression_TPM, y=Editing_Rate, shape=Batch))+
+  theme_bw() +
+  geom_jitter(aes(color=Condition),alpha=0.8, size = 6)+
+  scale_color_manual(values = wes_palette(n=3,name="GrandBudapest1"))+
+  stat_cor(size = inplot_text_size,
+  label.x=6,
+  label.y.npc = "middle")+
+  labs(x = "log(Expression TPM)", y = "RNA Editing Rate")+
+  theme(axis.text.x=element_text(size=text_size),
+        axis.text.y=element_text(size=text_size))+
+  theme(text = element_text(size =text_size))+
+  labs(title="APOBEC3B Nonsyn SNV: TPM vs Editing Rate")+
+  theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+  theme(legend.key.size = unit(legend_size,'cm'),
+        legend.title = element_text(color = "black", size =legend_text_size),
+        legend.text = element_text(color = "black", size = legend_text_size))+
+     guides(color = guide_legend(override.aes = list(size = 7)))
+
+ifnb_3_plot<-ggarrange(tpm_rate_plot_3b, tpm_rate_plot_3f,
+                      labels =c("E","F"),
+                      font.label=list(color="black",size= text_size),
+                      ncol=2)
+
+ifnb_plot<-ggarrange(ifnb_1_plot,ifnb_2_plot,ifnb_3_plot, nrow=3)
+
+ifnb_plot<-annotate_figure(ifnb_plot, top=text_grob("IFNb-Stimualted Monocytes",
+                              color = "black", face = "bold", size =title_text_size))
+
+ggsave(plot=ifnb_plot,filename="Stim/Figures/figure4:ifnb_all_plot.jpg",width = 20, height = 15,
+       dpi = 600)
+```
+
+
+### IFNb Plots
+```{r ifnb_10, echo=FALSE, fig.cap="All plots for IFNb samples", out.width = '100%'}
+knitr::include_graphics("Stim/Figures/figure4:ifnb_all_plot.jpg")
+```
+
+
+
+### IFNb Counts 
+```{r path_16, echo= TRUE, message = FALSE, warning=FALSE}
+IFNb_Basal_DE_Sites<-read_tsv("Stim/TopTable/IFNb_1_toptable.tsv")%>%
+  dplyr::filter(adj.P.Val <= 0.05)
+
+IFNb_Basal_DE_Sites_Gene<-read_tsv("Stim/TopTable/IFNb_Basal_DE_Sites.tsv")
+IFNb_Basal_DEG<-read_tsv("Stim/TopTable/IFNb_Basal_DEG.tsv")
+
+Category<-c("DE_Sites, Site count", "DE_Sites_Gencode_Annotated, Gene count", "DE_Genes, Gene count")
+Threshold<-c("adj.P < 0.05","adj.P < 0.05","adj.P.Val < 0.05 & abs(logFC) > 1")
+
+Count<-c(as.integer(nrow(IFNb_Basal_DE_Sites)), as.integer(nrow(IFNb_Basal_DE_Sites_Gene)),
+         as.integer(nrow(IFNb_Basal_DEG)))
+
+Unique_Gene<- c("All Sites Unique",as.integer(length(unique(IFNb_Basal_DE_Sites_Gene$GENENAME))),
+                as.integer(length(unique(IFNb_Basal_DEG$GENENAME))))
+
+df<-data.frame(Threshold, Category, Count, Unique_Gene)
+knitr::kable(df, "simple", caption = "IFNb: All Count", table.attr = "style='width:100%;'")
+```
+
+
+## Risk genes in LPS and IFNb
+
+
+```{r stim_15, echo= TRUE, message = FALSE, warning=FALSE,eval=FALSE}
+vol_plot<-function(t, point_size, text_size,title_text_size,plot_title,label_size){
+  vol_plot<- ggplot(t, aes(x=logFC, y=-log10(P.Value), col = DE_direction))+
+    geom_point(size =point_size, alpha=0.7)+
+    theme_bw()+
+    scale_color_manual(values = wes_palette(n=5,name="Rushmore1"))+
+    geom_vline(xintercept=c(-1,1), col ="black",linetype="longdash")+
+    labs(title=plot_title)+
+    theme(plot.title = element_text(size=title_text_size, face="bold", hjust=0.5))+
+    theme(text = element_text(size = text_size)) + 
+    theme(legend.position='none') 
+  vol_plot
+}
+
+process_deg<-function(table_in){
+  t<-read_tsv(table_in)
+  t$DE_genes<-case_when(
+      t$adj.P.Val < 0.05 & abs(t$logFC) > 1 ~ "TRUE", 
+      t$adj.P.Val > 0.05 & abs(t$logFC) < 1 ~ "FALSE"
+      )
+    # Adding UP and Down regulated gene count 
+    t$DE_direction<-case_when(
+    t$DE_genes == "TRUE" & t$logFC > 0.00 ~ "UP",
+    t$DE_genes == "TRUE" & t$logFC < 0.00 ~ "DOWN"
+    )
+    t
+}
+```
+
+```{r stim_16, echo= TRUE, message = FALSE, warning=FALSE,eval=FALSE}
+text_size =12
+title_text_size=12
+legend_size =1.2
+legend_text_size = 12
+point_size =2.4
+label_size = 3
+
+lps_risk<-process_deg("Stim/TopTable/LPS_Basal.tsv")
+highlight_df<-lps_risk%>%dplyr::filter(grepl("LRRK2|PLCG2|PILRA",GENENAME))
+lps_vol_plot<-vol_plot(lps_risk,point_size, text_size, title_text_size, "LPS vs Basal",label_size)+ 
+  geom_label_repel(data = highlight_df, aes(label = GENENAME, col = GENENAME),
+                  box.padding   = 0, max.overlaps = 3,
+                  point.padding = 0, force = 80,segment.size  = 0.2,
+                  point.size =point_size,fontface="bold",
+                  nudge_x = -0.1,hjust =0,size = label_size)+
+    geom_point(data = highlight_df, aes(label = GENENAME, col = GENENAME),size=3)+
+  theme(legend.position = "none")
+
+ifnb_risk<-process_deg("Stim/TopTable/IFNb_Basal.tsv")
+highlight_df<-ifnb_risk%>%dplyr::filter(grepl("LRRK2|PLCG2|PILRA",GENENAME))
+ifnb_vol_plot<-vol_plot(ifnb_risk,point_size, text_size, title_text_size, "IFNb vs Basal",label_size)+
+  geom_label_repel(data = highlight_df, aes(label = GENENAME, col = GENENAME),
+                  box.padding   = 0, max.overlaps = 3,
+                  point.padding = 0, force = 80,segment.size  = 0.2,
+                  point.size =point_size,fontface="bold",
+                  nudge_x = -0.1,hjust =0,size = label_size)+
+    geom_point(data = highlight_df, aes(label = GENENAME, col = GENENAME),size=3)+
+  theme(legend.position = "none")
+
+AD_risk_stim<-ggarrange(lps_vol_plot,ifnb_vol_plot,
+                              labels=c("E","F"),
+                              font.label=list(color="black",size= text_size),
+                              ncol=2, common.legend = TRUE, legend="top")
+
+AD_risk_stim<-annotate_figure(AD_risk_stim, 
+                top=text_grob("Risk Genes Found in Stim DEG",
+                              color = "black", face = "bold", size =title_text_size))
+
+ggsave(plot=AD_risk_stim,filename="Stim/Figures/figure5:PD_AD_risk_DEG.jpg",width = 10, height = 4,dpi = 600)
+```
+
+```{r stim_17, echo=FALSE, fig.cap="PD AD Risk genes in Stim DEG", out.width = '100%'}
+knitr::include_graphics("Stim/Figures/figure5:PD_AD_risk_DEG.jpg")
+```
